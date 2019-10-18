@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ASIX WebUSB Experiments</title>
+  <style>
+    body
+    {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      font-family: sans-serif;
+      background-color: #3c3f41;
+    }
+    #content
+    {
+      min-width: 640px;
+      min-height: 300px;
+      background-color: #ddd;
+      padding: 20px;
+      box-shadow: 2px 2px 12px 0 rgba(0,0,0,0.34);
+    }
+    label
+    {
+      display: block;
+      text-transform: uppercase;
+      font-weight: bold;
+      margin: 10px 0;
+    }
+    label[for="input_mac"]
+    {
+      margin-top: 0;
+    }
+    #input_mac_wrapper
+    {
+      position: relative;
+      min-height: 120px;
+    }
+    .input_mac_shared
+    {
+      font-size: 8ch;
+      font-family: monospace;
+      letter-spacing: 0.5ch;
+      padding: 1ch;
+    }
+    #input_mac
+    {
+      width: 18ch;
+      border: 1px solid rgba(0, 0, 0, 0.1);
+    }
+    #input_mac_overlay
+    {
+      position: absolute;
+      top: 0;
+      left: 0;
+      padding-left: 1.75ch;
+      pointer-events: none;
+      opacity: 0.2;
+      width: 17.25ch;
+      border: 1px solid rgba(0, 0, 0, 0);
+      background-color: rgba(0,0,0,0);
+    }
+    .chunky-button
+    {
+      padding: 20px;
+
+    }
+    #button_controls
+    {
+      margin-top: 10px;
+      direction: rtl;
+    }
+    p
+    {
+      color: #585858;
+      font-size: 0.85em;
+    }
+    p:last-child
+    {
+      margin-bottom: 0;
+    }
+    a
+    {
+      color: #355d98;
+    }
+    hr
+    {
+      margin: 20px 0;
+      border-bottom: 0;
+      opacity: 0.3;
+    }
+    .hidden
+    {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="content">
+
+  <label for="input_mac">MAC Address</label>
+  <div id="input_mac_wrapper">
+    <input type="text" id="input_mac" class="input_mac_shared" maxlength="12" placeholder="112233445566" pattern="^([0-9A-Fa-f]{2}){6}$" autocomplete="off" spellcheck="false"/>
+    <input type="text" id="input_mac_overlay" class="input_mac_shared" maxlength="12" placeholder=" : : : : : "/>
+  </div>
+  <div id="button_controls">
+    <button id="button_write" class="chunky-button">Write MAC address</button>
+  </div>
+  <hr>
+  <p id="label_complete" class="hidden">
+    Done. The original EEPROM data backup has also been downloaded for your safekeeping.
+  </p>
+  <p>
+    Experimental WebUSB utility to change MAC addresses on AX88179 USB3.0 to GbE devices.
+    <br/>
+    On Windows, use <a href="https://zadig.akeo.ie/">Zadig</a> to switch the loaded driver to WinUSB for Chrome to access it.
+    <br/>
+    <br/>
+    Chrome only (unfortunately). Very limited error checking, please understand the risks before use.
+    <br/>
+    <br/>
+    <a href="https://github.com/jglim/ASIXFlash/">Source</a>
+
+    <a href="https://twitter.com/jg_lim" style="float: right">@jg_lim</a>
+  </p>
+</div>
+
+<script>
+    // take a look at @seiyanuta's CP2102 reference:  https://gist.github.com/seiyanuta/2c70ba8855f50c536a51f0c5993c1e4c
+
+    const ASIX_VID = 0x0B95;
+    const AX_PID = 0x1790;
+
+    const AX_ACCESS_MAC = 0x01;
+    const AX_NODE_ID = 0x10;
+    const AX_ACCESS_EEPROM = 0x04;
+    const AX_RELOAD_EEPROM_EFUSE = 0x06;
+    const AX_WRITE_EEPROM_EN = 0x07;
+    const AX_WRITE_EEPROM_DIS = 0x08;
+    const AX_ETH_ALEN = 6;
+    const AX_EEPROM_SIZE_BYTES = 0x86;
+
+    async function usb_connect()
+    {
+        const filters = [
+            { 'vendorId': ASIX_VID, 'productId': AX_PID }
+        ];
+
+        return navigator.usb.getDevices().then(devices => {
+            if (devices.length > 0) {
+                const usb = devices[0];
+                this.usb = usb;
+                return usb;
+            } else {
+                return navigator.usb.requestDevice({ filters }).then(usb => {
+                    this.usb = usb;
+                    return usb;
+                })
+            }
+        })
+    }
+
+    async function usb_initialize()
+    {
+        return this.usb.open()
+            .then(() => {
+                return this.usb.selectConfiguration(1);
+            })
+            .then(() => {
+                return this.usb.claimInterface(0);
+            });
+    }
+
+    async function usb_prepare()
+    {
+        await usb_connect();
+        await usb_initialize();
+        console.log("Connected and initialized");
+    }
+
+    async function ax_read_node_id()
+    {
+        return await control_read(AX_ACCESS_MAC, AX_NODE_ID, AX_ETH_ALEN, AX_ETH_ALEN);
+    }
+
+    async function ax_dump_eeprom()
+    {
+        // note that the protocol expects uint16s when accessing the EEPROM
+        let read_bytes = new Uint8Array(AX_EEPROM_SIZE_BYTES);
+        for (let i = 0; i < AX_EEPROM_SIZE_BYTES; i++)
+        {
+            if (i % 2 !== 0)
+            {
+                continue;
+            }
+            let single_read_response = await control_read(AX_ACCESS_EEPROM, parseInt(i / 2), 1, 2);
+            read_bytes[i] = single_read_response[0];
+            read_bytes[i+1] = single_read_response[1];
+        }
+        return read_bytes;
+    }
+
+    async function ax_write_eeprom(buffer)
+    {
+        // use it like: await ax_write_eeprom(new Uint8Array([0xBE, 0xEF, 0xCA, 0xFE, 0xF0, 0x0D]));
+        // limiting writes to 6 bytes
+        console.log(`!! Writing EEPROM with: ${bytes_to_hex(buffer)}`);
+        if ((buffer.length % 2 !== 0) || (buffer.length !== 6))
+        {
+            console.log("EEPROM buffer length is invalid, exiting");
+        }
+        else
+        {
+            await control_write(AX_WRITE_EEPROM_EN, 0, 0, new Uint8Array(0));
+
+            for (let i = 0; i < buffer.length; i++)
+            {
+                if (i % 2 === 0)
+                {
+                    await control_write(AX_ACCESS_EEPROM, parseInt(i / 2), 1, new Uint8Array([buffer[i], buffer[i+1]]))
+                }
+            }
+            await control_write(AX_WRITE_EEPROM_DIS, 0, 0, new Uint8Array(0));
+            await control_write(AX_RELOAD_EEPROM_EFUSE, 0, 0, new Uint8Array(0));
+        }
+    }
+
+    async function download_eeprom()
+    {
+        let eeprom = await ax_dump_eeprom();
+        let filename = `ax88179_eeprom_${bytes_to_hex(eeprom.slice(0,6))}.bin`;
+        save_uint8array(eeprom, filename);
+    }
+
+    async function control_read(request, value, index, length)
+    {
+        let usb_response = await this.usb.controlTransferIn({
+            requestType: 'vendor',
+            recipient: 'device',
+            request: request,
+            index: index,
+            value: value
+        }, length);
+        return new Uint8Array(usb_response.data.buffer);
+    }
+
+    async function control_write(request, value, index, data)
+    {
+        return this.usb.controlTransferOut({
+            requestType: 'vendor',
+            recipient: 'device',
+            request: request,
+            index: index,
+            value: value
+        }, data);
+    }
+
+    function bytes_to_hex(buffer)
+    {
+        return Array
+            .from(new Uint8Array (buffer))
+            .map(b => b.toString(16).padStart(2, "0"))
+            .join("").toUpperCase();
+    }
+
+    function save_uint8array(in_array, file_name)
+    {
+        let placeholder = document.createElement('a');
+        placeholder.href = URL.createObjectURL(new Blob([in_array], { type: 'application/octet-stream' }));
+        placeholder.download = file_name;
+        document.body.appendChild(placeholder);
+        placeholder.click();
+        document.body.removeChild(placeholder);
+    }
+
+
+    window.onerror = function(message, source, lineno, colno, error) {
+        alert(message);
+    };
+
+    function verify_user_mac(in_mac)
+    {
+        let result = new Uint8Array(6);
+        if (in_mac.length !== 12)
+        {
+            return false;
+        }
+        for (let i = 0; i < in_mac.length; i++)
+        {
+            if (i % 2 === 0)
+            {
+                let chunk = in_mac.slice(i, i+2);
+                result[parseInt(i / 2)] = parseInt(chunk, 16);
+            }
+        }
+        return result;
+    }
+
+    document.getElementById("button_write").addEventListener("click", async () => {
+        let mac_text = document.getElementById("input_mac").value;
+        let mac_parsed = verify_user_mac(mac_text);
+        if (mac_parsed !== false)
+        {
+            await usb_prepare();
+            await download_eeprom();
+            await ax_write_eeprom(mac_parsed);
+            document.getElementById("label_complete").classList.remove("hidden");
+        }
+    });
+
+</script>
+</body>
+</html>
